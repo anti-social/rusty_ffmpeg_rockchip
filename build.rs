@@ -3,20 +3,22 @@ use bindgen::{callbacks, Bindings};
 use camino::Utf8Path as Path;
 use camino::Utf8PathBuf as PathBuf;
 use once_cell::sync::Lazy;
-use std::{collections::HashSet, env, fs};
+use std::collections::HashSet;
+use std::env;
+use std::fs::{self, File};
+use std::io::Write;
+use std::process::Command;
 
 /// All the libs that FFmpeg has
-static LIBS: Lazy<[&str; 7]> = Lazy::new(|| {
-    [
-        "avcodec",
-        "avdevice",
-        "avfilter",
-        "avformat",
-        "avutil",
-        "swresample",
-        "swscale",
-    ]
-});
+static LIBS: &'static [&'static str] = &[
+        "libavcodec",
+        "libavdevice",
+        "libavfilter",
+        "libavformat",
+        "libavutil",
+        "libswresample",
+        "libswscale",
+];
 
 /// Whitelist of the headers we want to generate bindings
 static HEADERS: Lazy<Vec<PathBuf>> = Lazy::new(|| {
@@ -288,35 +290,35 @@ fn linking_with_single_lib(library_name: &str, ffmpeg_lib_dir: &Path, mode: FFmp
 
 #[allow(dead_code)]
 pub struct EnvVars {
+    target: String,
     docs_rs: Option<String>,
-    out_dir: Option<PathBuf>,
-    ffmpeg_include_dir: Option<PathBuf>,
+    out_dir: PathBuf,
+    num_jobs: String,
+    ffmpeg_configuration: Vec<String>,
     ffmpeg_link_mode: Option<FFmpegLinkMode>,
-    ffmpeg_dll_path: Option<PathBuf>,
-    ffmpeg_pkg_config_path: Option<PathBuf>,
-    ffmpeg_libs_dir: Option<PathBuf>,
-    ffmpeg_binding_path: Option<PathBuf>,
+    ffmpeg_rockchip_mpp: bool,
 }
 
 impl EnvVars {
     fn init() -> Self {
         println!("cargo:rerun-if-env-changed=DOCS_RS");
         println!("cargo:rerun-if-env-changed=OUT_DIR");
-        println!("cargo:rerun-if-env-changed=FFMPEG_INCLUDE_DIR");
-        println!("cargo:rerun-if-env-changed=FFMPEG_DLL_PATH");
-        println!("cargo:rerun-if-env-changed=FFMPEG_PKG_CONFIG_PATH");
-        println!("cargo:rerun-if-env-changed=FFMPEG_LIBS_DIR");
-        println!("cargo:rerun-if-env-changed=FFMPEG_BINDING_PATH");
+        println!("cargo:rerun-if-env-changed=FFMPEG_CONFIGURATION");
         println!("cargo:rerun-if-env-changed=FFMPEG_LINK_MODE");
+        println!("cargo:rerun-if-env-changed=FFMPEG_ROCKCHIP_MPP");
         Self {
+            target: env::var("TARGET").expect("TARGET env var"),
             docs_rs: env::var("DOCS_RS").ok(),
-            out_dir: env::var("OUT_DIR").ok().map(remove_verbatim),
-            ffmpeg_include_dir: env::var("FFMPEG_INCLUDE_DIR").ok().map(remove_verbatim),
-            ffmpeg_dll_path: env::var("FFMPEG_DLL_PATH").ok().map(remove_verbatim),
-            ffmpeg_pkg_config_path: env::var("FFMPEG_PKG_CONFIG_PATH").ok().map(remove_verbatim),
-            ffmpeg_libs_dir: env::var("FFMPEG_LIBS_DIR").ok().map(remove_verbatim),
-            ffmpeg_binding_path: env::var("FFMPEG_BINDING_PATH").ok().map(remove_verbatim),
+            out_dir: remove_verbatim(env::var("OUT_DIR").expect("OUT_DIR env var")),
+            num_jobs: env::var("NUM_JOBS").expect("NUM_JOBS env var"),
+            ffmpeg_configuration: env::var("FFMPEG_CONFIGURATION").expect("FFMPEG_CONFIGURATION env var")
+                .split(' ')
+                .filter(|v| !v.is_empty())
+                .map(String::from)
+                .collect(),
             ffmpeg_link_mode: env::var("FFMPEG_LINK_MODE").ok().map(Into::into),
+            ffmpeg_rockchip_mpp: env::var("FFMPEG_ROCKCHIP_MPP")
+                .map(|v| v.trim().parse().unwrap_or(false)).unwrap_or(false),
         }
     }
 }
@@ -350,7 +352,7 @@ mod pkg_config_linking {
                 .env_metadata(false)
                 .print_system_libs(false)
                 .print_system_cflags(false)
-                .probe(&format!("lib{}", libname))?;
+                .probe(libname)?;
         }
 
         // real linking
@@ -358,7 +360,7 @@ mod pkg_config_linking {
         for libname in library_names {
             let new_paths = pkg_config::Config::new()
                 .statik(statik)
-                .probe(&format!("lib{}", libname))
+                .probe(libname)
                 .unwrap_or_else(|_| panic!("{} not found!", libname))
                 .include_paths;
             for new_path in new_paths {
@@ -370,180 +372,55 @@ mod pkg_config_linking {
     }
 }
 
-#[cfg(feature = "link_vcpkg_ffmpeg")]
-mod vcpkg_linking {
-    use super::*;
-
-    fn linking_with_vcpkg(
-        _env_vars: &EnvVars,
-        _library_names: &[&str],
-    ) -> Result<Vec<PathBuf>, vcpkg::Error> {
-        Ok(vcpkg::Config::new()
-            .find_package("ffmpeg")?
-            .include_paths
-            .into_iter()
-            .map(|x| PathBuf::from_path_buf(x).unwrap())
-            .collect())
-    }
-
-    pub fn linking_with_vcpkg_and_bindgen(
-        env_vars: &EnvVars,
-        output_binding_path: &Path,
-    ) -> Result<(), vcpkg::Error> {
-        let include_paths = linking_with_vcpkg(env_vars, &*LIBS)?;
-        if let Some(ffmpeg_binding_path) = env_vars.ffmpeg_binding_path.as_ref() {
-            use_prebuilt_binding(ffmpeg_binding_path, output_binding_path);
-        } else {
-            generate_bindings(&include_paths[0], &HEADERS)
-                .write_to_file(output_binding_path)
-                .expect("Cannot write binding to file.");
-        }
-        Ok(())
-    }
-}
-
-fn dynamic_linking(env_vars: EnvVars) {
-    let ffmpeg_dll_path = env_vars.ffmpeg_dll_path.as_ref().unwrap();
-    if ffmpeg_dll_path.is_dir() {
-        linking_with_libs_dir(&*LIBS, ffmpeg_dll_path, FFmpegLinkMode::Dynamic);
-    } else {
-        let (lib_name, ffmpeg_dll_dir) = (
-            ffmpeg_dll_path
-                .file_stem()
-                .map(|stem| {
-                    if cfg!(target_os = "windows") {
-                        stem
-                    } else {
-                        stem.trim_start_matches("lib")
-                    }
-                })
-                .unwrap()
-                .to_string(),
-            ffmpeg_dll_path.parent().unwrap().to_path_buf(),
-        );
-        linking_with_single_lib(&lib_name, &ffmpeg_dll_dir, FFmpegLinkMode::Dynamic);
-    }
-
-    let output_binding_path = &env_vars.out_dir.as_ref().unwrap().join("binding.rs");
-    if let Some(ffmpeg_binding_path) = env_vars.ffmpeg_binding_path.as_ref() {
-        use_prebuilt_binding(ffmpeg_binding_path, output_binding_path);
-    } else if let Some(ffmpeg_include_dir) = env_vars.ffmpeg_include_dir.as_ref() {
-        generate_bindings(ffmpeg_include_dir, &HEADERS)
-            // Is it correct to generate binding to one file? :-/
-            .write_to_file(output_binding_path)
-            .expect("Cannot write binding to file.");
-    } else {
-        panic!("No binding generation method is set!");
-    }
-}
-
-fn linking(env_vars: EnvVars) {
-    let output_binding_path = &env_vars.out_dir.as_ref().unwrap().join("binding.rs");
+fn linking(
+    env_vars: &EnvVars,
+    ffmpeg_include_dir: &Path,
+    ffmpeg_pkg_config_path: &str,
+) {
+    let output_binding_path = &env_vars.out_dir.join("binding.rs");
 
     #[cfg(not(target_os = "windows"))]
     {
         fn linking_with_pkg_config_and_bindgen(
             env_vars: &EnvVars,
+            ffmpeg_include_dir: &Path,
             output_binding_path: &Path,
         ) -> Result<(), pkg_config::Error> {
             // Probe libraries(enable emitting cargo metadata)
             let include_paths = pkg_config_linking::linking_with_pkg_config(
-                &*LIBS,
+                LIBS,
                 env_vars
                     .ffmpeg_link_mode
                     .map(|x| x.is_static())
                     .unwrap_or_default(),
             )?;
-            if let Some(ffmpeg_binding_path) = env_vars.ffmpeg_binding_path.as_ref() {
-                use_prebuilt_binding(ffmpeg_binding_path, output_binding_path);
-            } else if let Some(ffmpeg_include_dir) = env_vars.ffmpeg_include_dir.as_ref() {
-                // If use ffmpeg_pkg_config_path with ffmpeg_include_dir, prefer using the user given dir rather than pkg_config_path.
-                generate_bindings(ffmpeg_include_dir, &HEADERS)
-                    .write_to_file(output_binding_path)
-                    .expect("Cannot write binding to file.");
-            } else {
-                generate_bindings(&include_paths[0], &HEADERS)
-                    .write_to_file(output_binding_path)
-                    .expect("Cannot write binding to file.");
-            }
+            generate_bindings(ffmpeg_include_dir, &HEADERS)
+                .write_to_file(output_binding_path)
+                .expect("Cannot write binding to file.");
             Ok(())
         }
         // Hint: set PKG_CONFIG_PATH to some placeholder value will let pkg_config probing system library.
-        if let Some(ffmpeg_pkg_config_path) = env_vars.ffmpeg_pkg_config_path.as_ref() {
-            if !Path::new(ffmpeg_pkg_config_path).exists() {
-                panic!(
-                    "error: FFMPEG_PKG_CONFIG_PATH is set to `{}`, which does not exist.",
-                    ffmpeg_pkg_config_path
-                );
-            }
-            env::set_var("PKG_CONFIG_PATH", ffmpeg_pkg_config_path);
-            linking_with_pkg_config_and_bindgen(&env_vars, output_binding_path)
-                .expect("Static linking with pkg-config failed.");
-        } else if let Some(ffmpeg_libs_dir) = env_vars.ffmpeg_libs_dir.as_ref() {
-            linking_with_libs_dir(
-                &*LIBS,
-                ffmpeg_libs_dir,
-                env_vars.ffmpeg_link_mode.unwrap_or(FFmpegLinkMode::Static),
-            );
-            if let Some(ffmpeg_binding_path) = env_vars.ffmpeg_binding_path.as_ref() {
-                use_prebuilt_binding(ffmpeg_binding_path, output_binding_path);
-            } else if let Some(ffmpeg_include_dir) = env_vars.ffmpeg_include_dir.as_ref() {
-                generate_bindings(ffmpeg_include_dir, &HEADERS)
-                    .write_to_file(output_binding_path)
-                    .expect("Cannot write binding to file.");
-            } else {
-                panic!("No binding generation method is set!");
-            }
+        // if !Path::new(ffmpeg_pkg_config_path).exists() {
+        //     panic!(
+        //         "error: FFMPEG_PKG_CONFIG_PATH is set to `{}`, which does not exist.",
+        //         ffmpeg_pkg_config_path
+        //     );
+        // }
+        // Detect if we are inside a nix shell
+        if env::var("PKG_CONFIG_PATH_FOR_TARGET").is_ok() {
+            env::set_var("PKG_CONFIG_PATH_FOR_TARGET", ffmpeg_pkg_config_path);
         } else {
-            #[cfg(not(any(feature = "link_system_ffmpeg", feature = "link_vcpkg_ffmpeg")))]
-            panic!(
-                "
-!!!!!!! rusty_ffmpeg: No linking method set!
-Use `FFMPEG_PKG_CONFIG_PATH` or `FFMPEG_LIBS_DIR` if you have prebuilt FFmpeg libraries.
-Enable `link_system_ffmpeg` feature if you want to link ffmpeg libraries installed in system path(which can be probed by pkg-config).
-Enable `link_vcpkg_ffmpeg` feature if you want to link ffmpeg libraries installed by vcpkg.
-"
-            );
-            #[cfg(any(feature = "link_system_ffmpeg", feature = "link_vcpkg_ffmpeg"))]
-            {
-                let mut success = false;
-                let mut error = String::new();
-                #[cfg(feature = "link_system_ffmpeg")]
-                if !success {
-                    if let Err(e) =
-                        linking_with_pkg_config_and_bindgen(&env_vars, output_binding_path)
-                    {
-                        error.push('\n');
-                        error.push_str(&format!("Link system FFmpeg failed: {:?}", e));
-                    } else {
-                        println!("Link system FFmpeg succeeded.");
-                        success = true;
-                    }
-                }
-                #[cfg(feature = "link_vcpkg_ffmpeg")]
-                if !success {
-                    if let Err(e) = vcpkg_linking::linking_with_vcpkg_and_bindgen(
-                        &env_vars,
-                        output_binding_path,
-                    ) {
-                        error.push('\n');
-                        error.push_str(&format!("Link vcpkg FFmpeg failed: {:?}", e));
-                    } else {
-                        println!("Link vcpkg FFmpeg succeeded.");
-                        success = true;
-                    }
-                }
-                if !success {
-                    panic!("FFmpeg linking trial failed: {}", error);
-                }
-            }
+            env::set_var("PKG_CONFIG_PATH", ffmpeg_pkg_config_path);
         }
+        linking_with_pkg_config_and_bindgen(&env_vars, ffmpeg_include_dir, output_binding_path)
+            .expect("Static linking with pkg-config failed.");
     }
+
     #[cfg(target_os = "windows")]
     {
         if let Some(ffmpeg_libs_dir) = env_vars.ffmpeg_libs_dir.as_ref() {
             linking_with_libs_dir(
-                &*LIBS,
+                LIBS,
                 ffmpeg_libs_dir,
                 env_vars.ffmpeg_link_mode.unwrap_or(FFmpegLinkMode::Static),
             );
@@ -572,26 +449,230 @@ Enable `link_vcpkg_ffmpeg` feature if you want to link ffmpeg provided by vcpkg.
     }
 }
 
-fn docs_rs_linking(env_vars: EnvVars) {
-    // If it's a documentation generation from docs.rs, just copy the bindings
-    // generated locally to `OUT_DIR`. We do this because the building
-    // environment of docs.rs doesn't have an network connection, so we cannot
-    // git clone the FFmpeg. And they also have a limitation on crate's size:
-    // 10MB, which is not enough to fit in FFmpeg source files. So the only
-    // thing we can do is copying the locally generated binding files to the
-    // `OUT_DIR`.
-    let binding_file_path = &env_vars.out_dir.as_ref().unwrap().join("binding.rs");
-    use_prebuilt_binding(Path::new("src/binding.rs"), binding_file_path);
+fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS env var");
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH env var");
+    let cpu_arch = match target_arch.as_str() {
+        "aarch64" => "armv8-a",
+        _ => &target_arch
+    };
+
+    let (meson_cross_path, ffmpeg_cross_opts) =
+        if let Ok(cross_toolchain_prefix) = env::var("CROSS_TOOLCHAIN_PREFIX")
+    {
+        let meson_cross_path = env_vars.out_dir.join("meson_cross.txt");
+        let mut meson_cross_file = File::create(&meson_cross_path)
+            .expect("Failed to create meson_cross.txt file");
+        meson_cross_file.write_all(
+            indoc::formatdoc! {"
+                [binaries]
+                c = '{cross_toolchain_prefix}gcc'
+                cpp = '{cross_toolchain_prefix}g++'
+                ar = '{cross_toolchain_prefix}ar'
+                strip = '{cross_toolchain_prefix}strip'
+
+                [host_machine]
+                system = 'linux'
+                cpu_family = 'x86_64'
+                cpu = 'x86_64'
+                endian = 'little'
+
+                [properties]
+                needs_exe_wrapper = true
+            "}.as_bytes()
+        ).expect("Failed to write meson_cross.txt file");
+        (
+            Some(meson_cross_path),
+            Some([
+                "--enable-cross-compile".to_string(),
+                format!("--cc={cross_toolchain_prefix}gcc"),
+                format!("--cxx={cross_toolchain_prefix}g++"),
+                format!("--ld={cross_toolchain_prefix}g++"),
+                format!("--ar={cross_toolchain_prefix}ar"),
+                format!("--strip={cross_toolchain_prefix}strip"),
+                format!("--cpu={cpu_arch}"),
+                format!("--target-os={target_os}"),
+                format!("--arch={target_arch}"),
+            ])
+        )
+    } else {
+        (None, None)
+    };
+
+    let cmake_toolchain_path = env::var(
+        format!("CMAKE_TOOLCHAIN_FILE_{}", env_vars.target.replace("-", "_"))
+    ).ok();
+
+    let (ffmpeg_pkg_config_path, cleanup_files) = if env_vars.ffmpeg_rockchip_mpp {
+        let rockchip_librga_out_dir = env_vars.out_dir.join("rockchip-librga");
+        let rockchip_librga_build_dir = rockchip_librga_out_dir.join("meson");
+        let rockchip_librga_install_dir = rockchip_librga_out_dir.join("install");
+        let rockchip_librga_pkg_config_path = rockchip_librga_install_dir.join("lib").join("pkgconfig");
+        let mut rockchip_librga_setup_cmd = Command::new("meson");
+        rockchip_librga_setup_cmd
+            .args([
+                "setup", "vendor/rockchip-librga", rockchip_librga_build_dir.as_str(),
+            ]);
+        if let Some(meson_cross_path) = meson_cross_path {
+            rockchip_librga_setup_cmd
+                .args(["--cross-file", meson_cross_path.as_str()]);
+        }
+        rockchip_librga_setup_cmd
+            .args([
+                "--prefix", rockchip_librga_install_dir.as_str(),
+                "--libdir=lib",
+                "--buildtype=release",
+                "--default-library=static",
+                "-Dcpp_args=-fpermissive",
+                "-Dlibdrm=false",
+                "-Dlibrga_demo=false",
+            ]);
+        let rockchip_librga_setup_status = rockchip_librga_setup_cmd
+            .status()
+            .expect("Failed to run rockchip-librga setup");
+        assert!(rockchip_librga_setup_status.success(), "Error setting up rockchip-librga");
+        let rockchip_librga_configure_status = Command::new("meson")
+            .args(["configure", rockchip_librga_build_dir.as_str()])
+            .status()
+            .expect("Failed to run rockchip-librga configuration");
+        assert!(rockchip_librga_configure_status.success(), "Error configuring rockchip-librga");
+        let rockchip_librga_build_status = Command::new("ninja")
+            .args(["-C", rockchip_librga_build_dir.as_str(), "install"])
+            .status()
+            .expect("Failed to run rockchip-librga building");
+        assert!(rockchip_librga_build_status.success(), "Error building rockchip-librga");
+
+        let rockchip_mpp_out_dir = env_vars.out_dir.join("rockchip-mpp");
+        let rockchip_mpp_build_dir = rockchip_mpp_out_dir.join("cmake");
+        let rockchip_mpp_install_dir = rockchip_mpp_out_dir.join("install");
+        let rockchip_mpp_pkg_config_path = rockchip_mpp_install_dir.join("lib").join("pkgconfig");
+        let mut rockchip_mpp_configure_cmd = Command::new("cmake");
+        rockchip_mpp_configure_cmd
+            .arg("-GNinja")
+            .arg(format!("-DCMAKE_INSTALL_PREFIX={rockchip_mpp_install_dir}"))
+            .arg(format!("-Svendor/rockchip-mpp"))
+            .arg(format!("-B{rockchip_mpp_build_dir}"));
+        if let Some(cmake_toolchain_path) = cmake_toolchain_path {
+            rockchip_mpp_configure_cmd
+                .args(["--toolchain", &cmake_toolchain_path]);
+        }
+        let rockchip_mpp_configure_status = rockchip_mpp_configure_cmd
+            .status()
+            .expect("Failed to run rockchip-mpp configuration");
+        assert!(rockchip_mpp_configure_status.success(), "Error configuring rockchip-mpp");
+        let rockchip_mpp_build_status = Command::new("ninja")
+            .args([
+                "-C", rockchip_mpp_build_dir.as_str(),
+                "install",
+            ])
+            .status()
+            .expect("Failed to run rockchip-mpp building");
+        assert!(rockchip_mpp_build_status.success(), "Error building rockchip-mpp");
+
+        // println!("cargo:rustc-link-lib={}", rockchip_mpp_install_dir.join("lib").join("librockchip_mpp.a"));
+
+        (
+            Some(format!(
+                "{rockchip_mpp_pkg_config_path}:{rockchip_librga_pkg_config_path}"
+            )),
+            vec!(
+                rockchip_mpp_install_dir.join("lib").join("librockchip_mpp.so"),
+                rockchip_mpp_install_dir.join("lib").join("librockchip_vpu.so"),
+            )
+        )
+    } else {
+        (None, vec!())
+    };
+
+    let ffmpeg_out_dir = env_vars.out_dir.join("ffmpeg");
+    let ffmpeg_install_dir = ffmpeg_out_dir.join("install");
+    let mut ffmpeg_configure_cmd = Command::new(
+        Path::new("vendor/ffmpeg/configure").canonicalize()
+            .expect("ffmpeg configure absolute path")
+    );
+    ffmpeg_configure_cmd.current_dir("vendor/ffmpeg")
+        .arg(format!("--prefix={ffmpeg_install_dir}"))
+        .args([
+            "--enable-gpl",
+            "--enable-version3",
+            "--disable-iconv",
+            "--disable-zlib",
+            "--disable-everything",
+            "--disable-programs",
+            "--disable-doc",
+        ]);
+    if let Some(ffmpeg_cross_opts) = ffmpeg_cross_opts {
+        ffmpeg_configure_cmd
+            .args(&ffmpeg_cross_opts);
+    }
+    if let Some(ref ffmpeg_pkg_config_path) = ffmpeg_pkg_config_path {
+        // Detect if we are inside a nix shell
+        if let Ok(pkg_config_path) = env::var("PKG_CONFIG_PATH_FOR_TARGET") {
+            ffmpeg_configure_cmd.env(
+                "PKG_CONFIG_PATH_FOR_TARGET",
+                format!("{pkg_config_path}:{ffmpeg_pkg_config_path}")
+            );
+        } else {
+            let pkg_config_path = env::var("PKG_CONFIG_PATH").unwrap_or("".to_string());
+            ffmpeg_configure_cmd.env(
+                "PKG_CONFIG_PATH",
+                format!("{pkg_config_path}:{ffmpeg_pkg_config_path}")
+            );
+        };
+    }
+    ffmpeg_configure_cmd.args(&env_vars.ffmpeg_configuration);
+    assert!(
+        ffmpeg_configure_cmd.status()
+            .expect("Failed to run ffmpeg configuration")
+            .success(),
+        "Error configuring ffmpeg"
+    );
+    // FFMpeg produces object files just inside sources
+    let ffmpeg_clean_status = Command::new("make")
+        .args(["-C", "vendor/ffmpeg"])
+        .arg("clean")
+        .status()
+        .expect("Failed to run ffmpeg cleaning");
+    assert!(ffmpeg_clean_status.success(), "Error cleaning ffmpeg");
+    let ffmpeg_build_status = Command::new("make")
+        .args([
+            "-C", "vendor/ffmpeg",
+            "-j", &env_vars.num_jobs,
+        ])
+        .status()
+        .expect("Failed to build ffmpeg");
+    assert!(ffmpeg_build_status.success(), "Error building ffmpeg");
+    let ffmpeg_install_status = Command::new("make")
+        .args(["-C", "vendor/ffmpeg"])
+        .arg("install")
+        .status()
+        .expect("Failed to run ffmpeg installation");
+    assert!(ffmpeg_install_status.success(), "Error installing ffmpeg");
+
+    for cleanup_file_path in &cleanup_files {
+        // FIXME: Find out a way how to force a static linking
+        fs::remove_file(cleanup_file_path)
+            .expect(&format!("Failed to remove {cleanup_file_path} file"));
+    }
+
+    (
+        ffmpeg_install_dir.join("include"),
+        if let Some(ref ffmpeg_pkg_config_path) = ffmpeg_pkg_config_path {
+            format!(
+                "{}:{}",
+                ffmpeg_pkg_config_path,
+                ffmpeg_install_dir.join("lib").join("pkgconfig"),
+            )
+        } else {
+            ffmpeg_install_dir.join("lib").join("pkgconfig").as_str().to_string()
+        }
+    )
 }
 
 fn main() {
     let env_vars = EnvVars::init();
-    if env_vars.docs_rs.is_some() {
-        docs_rs_linking(env_vars);
-    } else if env_vars.ffmpeg_dll_path.is_some() {
-        dynamic_linking(env_vars);
-    } else {
-        // fallback to normal linking
-        linking(env_vars);
-    }
+
+    let (ffmpeg_include_dir, ffmpeg_pkg_config_path) = build_ffmpeg(&env_vars);
+
+    linking(&env_vars, &ffmpeg_include_dir, &ffmpeg_pkg_config_path);
 }

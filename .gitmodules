@@ -1,6 +1,6 @@
 [submodule "vendor/rockchip-mpp"]
 	path = vendor/rockchip-mpp
-	url = https://github.com/anti-social/rockchip-mpp.git
+	url = https://github.com/rockchip-linux/mpp.git
 [submodule "vendor/rockchip-librga"]
 	path = vendor/rockchip-librga
 	url = https://github.com/anti-social/rockchip-librga.git

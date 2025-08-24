@@ -7,3 +7,6 @@
 [submodule "vendor/ffmpeg"]
 	path = vendor/ffmpeg
 	url = https://github.com/nyanmisaka/ffmpeg-rockchip.git
+[submodule "vendor/libdrm"]
+	path = vendor/libdrm
+	url = https://gitlab.freedesktop.org/mesa/libdrm.git

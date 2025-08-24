@@ -1,0 +1,41 @@
+[build]
+pre-build = [
+  "echo Debian arch: $CROSS_DEB_ARCH",
+  "dpkg --add-architecture $CROSS_DEB_ARCH",
+  "apt-get update -y",
+  """
+    apt-get install  -y --no-install-recommends \
+      meson \
+      nasm \
+      ninja-build \
+      python3-setuptools \
+      protobuf-compiler
+  """,
+  """
+    if [ $CROSS_DEB_ARCH != "musl-linux-armhf" ]; then
+      apt-get install -y --no-install-recommends \
+        libudev-dev:$CROSS_DEB_ARCH
+    fi
+  """,
+]
+
+[build.env]
+passthrough = [
+  "FFMPEG_ROCKCHIP_MPP",
+  "FFMPEG_CONFIGURATION",
+]
+
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:edge"
+
+[target.armv7-unknown-linux-gnueabihf]
+image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:edge"
+
+[target.armv7-unknown-linux-musleabihf]
+image = "ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:edge"
+
+[target.riscv64gc-unknown-linux-musl]
+image = "ghcr.io/cross-rs/riscv64gc-unknown-linux-musl:edge"
+
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:edge"

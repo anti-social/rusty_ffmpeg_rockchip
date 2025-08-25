@@ -44,3 +44,10 @@ ffmpeg5 = []
 ffmpeg6 = []
 # FFmpeg 7.* support
 ffmpeg7 = []
+
+[dev-dependencies]
+clap = { version = "4.5.45", features = ["derive"] }
+rsmpeg = "0.17.0"
+
+[patch.crates-io]
+rusty_ffmpeg = { path = "./" }

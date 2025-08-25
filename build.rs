@@ -480,7 +480,7 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
         format!("CMAKE_TOOLCHAIN_FILE_{}", env_vars.target.replace("-", "_"))
     ).ok();
 
-    let (ffmpeg_pkg_config_path, cleanup_files) = if env_vars.ffmpeg_rockchip_mpp {
+    let (ffmpeg_pkg_config_path, dirs_to_cleanup_shared_libs) = if env_vars.ffmpeg_rockchip_mpp {
         let libdrm_out_dir = env_vars.out_dir.join("libdrm");
         let libdrm_build_dir = libdrm_out_dir.join("meson");
         let libdrm_install_dir = libdrm_out_dir.join("install");
@@ -590,15 +590,13 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
             .expect("Failed to run rockchip-mpp building");
         assert!(rockchip_mpp_build_status.success(), "Error building rockchip-mpp");
 
-        // println!("cargo:rustc-link-lib={}", rockchip_mpp_install_dir.join("lib").join("librockchip_mpp.a"));
-
         (
             Some(format!(
                 "{libdrm_pkg_config_path}:{rockchip_mpp_pkg_config_path}:{rockchip_librga_pkg_config_path}"
             )),
             vec!(
-                rockchip_mpp_install_dir.join("lib").join("librockchip_mpp.so"),
-                rockchip_mpp_install_dir.join("lib").join("librockchip_vpu.so"),
+                libdrm_install_dir.join("lib"),
+                rockchip_mpp_install_dir.join("lib"),
             )
         )
     } else {
@@ -670,10 +668,22 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
         .expect("Failed to run ffmpeg installation");
     assert!(ffmpeg_install_status.success(), "Error installing ffmpeg");
 
-    for cleanup_file_path in &cleanup_files {
+    for cleanup_shared_libs_dir in &dirs_to_cleanup_shared_libs {
         // FIXME: Find out a way how to force a static linking
-        fs::remove_file(cleanup_file_path)
-            .expect(&format!("Failed to remove {cleanup_file_path} file"));
+        for shared_lib_file_entry in fs::read_dir(cleanup_shared_libs_dir)
+            .expect("Cannot read directory with shared libs for removing")
+        {
+            let shared_lib_file_path = shared_lib_file_entry
+                .expect("Cannot get shared lib entry")
+                .path();
+            let shared_lib_file_name = shared_lib_file_path.file_name()
+                .expect("Missing shared lib file name")
+                .to_string_lossy();
+            if shared_lib_file_name.ends_with(".so") || shared_lib_file_name.contains(".so.") {
+                fs::remove_file(&shared_lib_file_path)
+                    .expect(&format!("Failed to remove {shared_lib_file_path:?} file"));
+            }
+        }
     }
 
     (
@@ -696,4 +706,7 @@ fn main() {
     let (ffmpeg_include_dir, ffmpeg_pkg_config_path) = build_ffmpeg(&env_vars);
 
     linking(&env_vars, &ffmpeg_include_dir, &ffmpeg_pkg_config_path);
+
+    // To link examples
+    println!("cargo:rustc-link-arg=-lstdc++");
 }

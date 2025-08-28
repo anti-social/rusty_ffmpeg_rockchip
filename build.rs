@@ -604,12 +604,24 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
     };
 
     let ffmpeg_out_dir = env_vars.out_dir.join("ffmpeg");
+    let ffmpeg_src_dir = ffmpeg_out_dir.join("src");
+    if !ffmpeg_src_dir.join("configure").exists() {
+        // We clone ffmpeg sources as ffmpeg produces build artifacts
+        // right in the source directory
+        let mut ffmpeg_git_clone_cmd = Command::new("git");
+        ffmpeg_git_clone_cmd.args(["clone", "vendor/ffmpeg", ffmpeg_src_dir.as_str()]);
+        assert!(
+            ffmpeg_git_clone_cmd.status()
+                                .expect("Failed to run git clone for ffmpeg")
+                                .success(),
+            "Failed to clone ffmpeg sources"
+        );
+    }
     let ffmpeg_install_dir = ffmpeg_out_dir.join("install");
     let mut ffmpeg_configure_cmd = Command::new(
-        Path::new("vendor/ffmpeg/configure").canonicalize()
-            .expect("ffmpeg configure absolute path")
+        ffmpeg_src_dir.join("configure")
     );
-    ffmpeg_configure_cmd.current_dir("vendor/ffmpeg")
+    ffmpeg_configure_cmd.current_dir(ffmpeg_src_dir)
         .arg(format!("--prefix={ffmpeg_install_dir}"))
         .args([
             "--enable-gpl",

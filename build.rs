@@ -621,7 +621,7 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
     let mut ffmpeg_configure_cmd = Command::new(
         ffmpeg_src_dir.join("configure")
     );
-    ffmpeg_configure_cmd.current_dir(ffmpeg_src_dir)
+    ffmpeg_configure_cmd.current_dir(&ffmpeg_src_dir)
         .arg(format!("--prefix={ffmpeg_install_dir}"))
         .args([
             "--enable-gpl",
@@ -658,23 +658,16 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
             .success(),
         "Error configuring ffmpeg"
     );
-    // FFMpeg produces object files just inside sources
-    let ffmpeg_clean_status = Command::new("make")
-        .args(["-C", "vendor/ffmpeg"])
-        .arg("clean")
-        .status()
-        .expect("Failed to run ffmpeg cleaning");
-    assert!(ffmpeg_clean_status.success(), "Error cleaning ffmpeg");
     let ffmpeg_build_status = Command::new("make")
         .args([
-            "-C", "vendor/ffmpeg",
+            "-C", ffmpeg_src_dir.as_str(),
             "-j", &env_vars.num_jobs,
         ])
         .status()
         .expect("Failed to build ffmpeg");
     assert!(ffmpeg_build_status.success(), "Error building ffmpeg");
     let ffmpeg_install_status = Command::new("make")
-        .args(["-C", "vendor/ffmpeg"])
+        .args(["-C", ffmpeg_src_dir.as_str()])
         .arg("install")
         .status()
         .expect("Failed to run ffmpeg installation");

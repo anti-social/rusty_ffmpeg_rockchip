@@ -631,6 +631,7 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
             "--disable-everything",
             "--disable-programs",
             "--disable-doc",
+            "--fatal-warnings",
         ]);
     if let Some(ffmpeg_cross_opts) = ffmpeg_cross_opts {
         ffmpeg_configure_cmd

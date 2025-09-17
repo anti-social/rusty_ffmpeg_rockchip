@@ -710,6 +710,8 @@ fn main() {
     let env_vars = EnvVars::init();
 
     let (ffmpeg_include_dir, ffmpeg_pkg_config_path) = build_ffmpeg(&env_vars);
+    println!("FFmpeg include dir: {ffmpeg_include_dir}");
+    println!("FFmpeg pkg-config path: {ffmpeg_pkg_config_path}");
 
     linking(&env_vars, &ffmpeg_include_dir, &ffmpeg_pkg_config_path);
 

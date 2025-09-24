@@ -51,7 +51,7 @@ ffmpeg8 = ["ffmpeg7_1"]
 
 [dev-dependencies]
 clap = { version = "4.5.45", features = ["derive"] }
-rsmpeg = "0.18.0"
+rsmpeg = { version = "0.18.0", default-features = false, features = ["ffmpeg7_1"] }
 
 [patch.crates-io]
 rusty_ffmpeg = { path = "./" }

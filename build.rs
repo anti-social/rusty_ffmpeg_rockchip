@@ -388,9 +388,10 @@ fn linking(
         } else {
             env::set_var("PKG_CONFIG_PATH", pkg_config_path);
         }
-        if let Ok(cross_sysroot) = env::var("CROSS_SYSROOT") {
+        if env::var("CROSS_SYSROOT").is_ok() {
             // cross > 0.2.5 do not work without this variable
-            env::set_var("PKG_CONFIG_SYSROOT_DIR", cross_sysroot);
+            // env::set_var("PKG_CONFIG_SYSROOT_DIR", cross_sysroot);
+            env::set_var("PKG_CONFIG_ALLOW_CROSS", "1");
         }
         linking_with_pkg_config_and_bindgen(&env_vars, ffmpeg_include_dir, output_binding_path)
             .expect("Static linking with pkg-config failed.");

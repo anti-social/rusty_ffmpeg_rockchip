@@ -431,17 +431,19 @@ Enable `link_vcpkg_ffmpeg` feature if you want to link ffmpeg provided by vcpkg.
 }
 
 fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
+    let cross_toolchain_prefix = env::var("CROSS_TOOLCHAIN_PREFIX").unwrap_or("".to_string());
+    let (meson_cross_path, ffmpeg_cross_opts) = if !cross_toolchain_prefix.is_empty() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS env var");
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH env var");
-    let cpu_arch = match target_arch.as_str() {
-        "aarch64" => "armv8-a",
-        "arm" => "armv7-a",
-        _ => &target_arch
-    };
+        println!("Target os: {target_os}");
+        let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH env var");
+        println!("Target arch: {target_arch}");
+        let cpu_arch = match target_arch.as_str() {
+            "aarch64" => "armv8-a",
+            "arm" => "armv7-a",
+            _ => &target_arch
+        };
+        println!("CPU arch: {cpu_arch:?}");
 
-    let (meson_cross_path, ffmpeg_cross_opts) =
-        if let Ok(cross_toolchain_prefix) = env::var("CROSS_TOOLCHAIN_PREFIX")
-    {
         let meson_cross_path = env_vars.out_dir.join("meson_cross.txt");
         let mut meson_cross_file = File::create(&meson_cross_path)
             .expect("Failed to create meson_cross.txt file");
@@ -463,29 +465,36 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
                 needs_exe_wrapper = true
             "}.as_bytes()
         ).expect("Failed to write meson_cross.txt file");
+        let mut ffmpeg_cross_opts = vec!();
+        ffmpeg_cross_opts.extend_from_slice(&[
+            "--enable-cross-compile".to_string(),
+            format!("--cross-prefix={cross_toolchain_prefix}"),
+            // format!("--cc={cross_toolchain_prefix}gcc"),
+            // format!("--cxx={cross_toolchain_prefix}g++"),
+            // format!("--ld={cross_toolchain_prefix}g++"),
+            // format!("--ar={cross_toolchain_prefix}ar"),
+            // format!("--strip={cross_toolchain_prefix}strip"),
+            format!("--cpu={cpu_arch}"),
+            format!("--arch={target_arch}"),
+            format!("--target-os={target_os}"),
+            // format!("--target-os=mingw32"),
+        ]);
         (
             Some(meson_cross_path),
-            Some([
-                "--enable-cross-compile".to_string(),
-                format!("--cc={cross_toolchain_prefix}gcc"),
-                format!("--cxx={cross_toolchain_prefix}g++"),
-                format!("--ld={cross_toolchain_prefix}g++"),
-                format!("--ar={cross_toolchain_prefix}ar"),
-                format!("--strip={cross_toolchain_prefix}strip"),
-                format!("--cpu={cpu_arch}"),
-                format!("--target-os={target_os}"),
-                format!("--arch={target_arch}"),
-            ])
+            Some(ffmpeg_cross_opts),
         )
     } else {
         (None, None)
     };
+    println!("{ffmpeg_cross_opts:?}");
 
     let cmake_toolchain_path = env::var(
         format!("CMAKE_TOOLCHAIN_FILE_{}", env_vars.target.replace("-", "_"))
     ).ok();
 
-    let (ffmpeg_pkg_config_path, dirs_to_cleanup_shared_libs) = if env_vars.ffmpeg_rockchip_mpp {
+    let mut ffmpeg_pkg_config_paths = vec!();
+
+    let dirs_to_cleanup_shared_libs = if env_vars.ffmpeg_rockchip_mpp {
         let libdrm_out_dir = env_vars.out_dir.join("libdrm");
         let libdrm_build_dir = libdrm_out_dir.join("meson");
         let libdrm_install_dir = libdrm_out_dir.join("install");
@@ -595,20 +604,42 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
             .expect("Failed to run rockchip-mpp building");
         assert!(rockchip_mpp_build_status.success(), "Error building rockchip-mpp");
 
-        (
-            Some(format!(
-                "{libdrm_pkg_config_path}:{rockchip_mpp_pkg_config_path}:{rockchip_librga_pkg_config_path}"
-            )),
-            vec!(
-                libdrm_install_dir.join("lib"),
-                rockchip_mpp_install_dir.join("lib"),
-            )
+        ffmpeg_pkg_config_paths.extend_from_slice(&[
+            libdrm_pkg_config_path,
+            rockchip_mpp_pkg_config_path,
+            rockchip_librga_pkg_config_path,
+        ]);
+
+        vec!(
+            libdrm_install_dir.join("lib"),
+            rockchip_mpp_install_dir.join("lib"),
         )
     } else {
-        (None, vec!())
+        vec!()
     };
 
+    let ffnvcodec_out_dir = env_vars.out_dir.join("ffnvcodec");
+    let ffnvcodec_install_dir = ffnvcodec_out_dir.join("install");
+    let ffnvcodec_build_status = Command::new("make")
+        .args([
+            "-C", "vendor/ffnvcodec"
+        ])
+        .status()
+        .expect("Failed to build ffnvcodec");
+    assert!(ffnvcodec_build_status.success(), "Error building rockchip-mpp");
+    let ffnvcodec_install_status = Command::new("make")
+        .args([
+            "-C", "vendor/ffnvcodec",
+            "install",
+        ])
+        .arg(format!("PREFIX={ffnvcodec_install_dir}"))
+        .status()
+        .expect("Failed to install ffnvcodec");
+    assert!(ffnvcodec_install_status.success(), "Error building rockchip-mpp");
+    ffmpeg_pkg_config_paths.push(ffnvcodec_install_dir.join("lib").join("pkgconfig"));
+
     let ffmpeg_out_dir = env_vars.out_dir.join("ffmpeg");
+    println!("ffmpeg output directory: {ffmpeg_out_dir:?}");
     let ffmpeg_src_dir = ffmpeg_out_dir.join("src");
     if !ffmpeg_src_dir.join("configure").exists() {
         // We clone ffmpeg sources as ffmpeg produces build artifacts
@@ -642,21 +673,29 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
         ffmpeg_configure_cmd
             .args(&ffmpeg_cross_opts);
     }
-    if let Some(ref ffmpeg_pkg_config_path) = ffmpeg_pkg_config_path {
-        // Detect if we are inside a nix shell
-        if let Ok(pkg_config_path) = env::var("PKG_CONFIG_PATH_FOR_TARGET") {
-            ffmpeg_configure_cmd.env(
-                "PKG_CONFIG_PATH_FOR_TARGET",
-                format!("{pkg_config_path}:{ffmpeg_pkg_config_path}")
-            );
-        } else {
-            let pkg_config_path = env::var("PKG_CONFIG_PATH").unwrap_or("".to_string());
-            ffmpeg_configure_cmd.env(
-                "PKG_CONFIG_PATH",
-                format!("{pkg_config_path}:{ffmpeg_pkg_config_path}")
-            );
-        };
-    }
+    // ffmpeg_configure_cmd.env("CC", "clang");
+    // ffmpeg_configure_cmd.env("CFLAGS", "-std=gnu17");
+    // ffmpeg_configure_cmd.env("CXXFLAGS", "-std=gnu17");
+
+    // Detect if we are inside a nix shell
+    // let mut ffmpeg_pkg_config_path = String::new();
+    let ffmpeg_pkg_config_path = ffmpeg_pkg_config_paths.iter()
+        .map(|p| p.as_str())
+        .collect::<Vec<_>>()
+        .join(":");
+    println!("pkg config path: {ffmpeg_pkg_config_path}");
+    if let Ok(pkg_config_path) = env::var("PKG_CONFIG_PATH_FOR_TARGET") {
+        ffmpeg_configure_cmd.env(
+            "PKG_CONFIG_PATH_FOR_TARGET",
+            format!("{pkg_config_path}:{ffmpeg_pkg_config_path}")
+        );
+    } else {
+        let pkg_config_path = env::var("PKG_CONFIG_PATH").unwrap_or("".to_string());
+        ffmpeg_configure_cmd.env(
+            "PKG_CONFIG_PATH",
+            format!("{pkg_config_path}:{ffmpeg_pkg_config_path}")
+        );
+    };
     ffmpeg_configure_cmd.args(&env_vars.ffmpeg_configuration);
     assert!(
         ffmpeg_configure_cmd.status()
@@ -699,15 +738,11 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
 
     (
         ffmpeg_install_dir.join("include"),
-        if let Some(ref ffmpeg_pkg_config_path) = ffmpeg_pkg_config_path {
-            format!(
-                "{}:{}",
-                ffmpeg_pkg_config_path,
-                ffmpeg_install_dir.join("lib").join("pkgconfig"),
-            )
-        } else {
-            ffmpeg_install_dir.join("lib").join("pkgconfig").as_str().to_string()
-        }
+        format!(
+            "{}:{}",
+            ffmpeg_pkg_config_path,
+            ffmpeg_install_dir.join("lib").join("pkgconfig"),
+        )
     )
 }
 

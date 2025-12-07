@@ -10,3 +10,6 @@
 [submodule "vendor/libdrm"]
 	path = vendor/libdrm
 	url = https://gitlab.freedesktop.org/mesa/libdrm.git
+[submodule "vendor/ffnvcodec"]
+	path = vendor/ffnvcodec
+	url = https://git.videolan.org/git/ffmpeg/nv-codec-headers.git

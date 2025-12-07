@@ -468,12 +468,11 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
         let mut ffmpeg_cross_opts = vec!();
         ffmpeg_cross_opts.extend_from_slice(&[
             "--enable-cross-compile".to_string(),
-            format!("--cross-prefix={cross_toolchain_prefix}"),
-            // format!("--cc={cross_toolchain_prefix}gcc"),
-            // format!("--cxx={cross_toolchain_prefix}g++"),
-            // format!("--ld={cross_toolchain_prefix}g++"),
-            // format!("--ar={cross_toolchain_prefix}ar"),
-            // format!("--strip={cross_toolchain_prefix}strip"),
+            format!("--cc={cross_toolchain_prefix}gcc"),
+            format!("--cxx={cross_toolchain_prefix}g++"),
+            format!("--ld={cross_toolchain_prefix}g++"),
+            format!("--ar={cross_toolchain_prefix}ar"),
+            format!("--strip={cross_toolchain_prefix}strip"),
             format!("--cpu={cpu_arch}"),
             format!("--arch={target_arch}"),
             format!("--target-os={target_os}"),
@@ -673,9 +672,6 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
         ffmpeg_configure_cmd
             .args(&ffmpeg_cross_opts);
     }
-    // ffmpeg_configure_cmd.env("CC", "clang");
-    // ffmpeg_configure_cmd.env("CFLAGS", "-std=gnu17");
-    // ffmpeg_configure_cmd.env("CXXFLAGS", "-std=gnu17");
 
     // Detect if we are inside a nix shell
     // let mut ffmpeg_pkg_config_path = String::new();

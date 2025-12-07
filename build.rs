@@ -433,7 +433,11 @@ Enable `link_vcpkg_ffmpeg` feature if you want to link ffmpeg provided by vcpkg.
 fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
     let cross_toolchain_prefix = env::var("CROSS_TOOLCHAIN_PREFIX").unwrap_or("".to_string());
     let (meson_cross_path, ffmpeg_cross_opts) = if !cross_toolchain_prefix.is_empty() {
-    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS env var");
+        let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS env var");
+        let target_os = match target_os.as_str() {
+            "windows" => "mingw32",
+            os => os,
+        };
         println!("Target os: {target_os}");
         let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH env var");
         println!("Target arch: {target_arch}");
@@ -473,11 +477,12 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
             format!("--ld={cross_toolchain_prefix}g++"),
             format!("--ar={cross_toolchain_prefix}ar"),
             format!("--strip={cross_toolchain_prefix}strip"),
-            format!("--cpu={cpu_arch}"),
             format!("--arch={target_arch}"),
             format!("--target-os={target_os}"),
-            // format!("--target-os=mingw32"),
         ]);
+        if cpu_arch != target_arch {
+            ffmpeg_cross_opts.push(format!("--cpu={cpu_arch}"));
+        }
         (
             Some(meson_cross_path),
             Some(ffmpeg_cross_opts),

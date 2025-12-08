@@ -526,6 +526,10 @@ fn build_all(env_vars: &EnvVars) -> (PathBuf, String) {
         build_ffnvcodec(env_vars, &mut pkg_config_dirs);
     }
 
+    if env_vars.ffmpeg_configuration.iter().any(|v| v == "--enable-libvpl") {
+        build_libvpl(env_vars, cmake_toolchain_path.as_deref(), &mut pkg_config_dirs);
+    }
+
     let ffmpeg_include_dir = build_ffmpeg(
         env_vars,
         ffmpeg_cross_opts.as_deref(),
@@ -721,6 +725,42 @@ fn build_ffnvcodec(env_vars: &EnvVars, pkg_config_dirs: &mut Vec<PathBuf>) {
     assert!(ffnvcodec_install_status.success(), "Error building rockchip-mpp");
 
     pkg_config_dirs.push(ffnvcodec_install_dir.join("lib").join("pkgconfig"));
+}
+
+fn build_libvpl(
+    env_vars: &EnvVars,
+    cmake_toolchain_path: Option<&str>,
+    pkg_config_dirs: &mut Vec<PathBuf>,
+) {
+    let out_dir = env_vars.out_dir.join("libvpl");
+    let build_dir = out_dir.join("cmake");
+    let install_dir = out_dir.join("install");
+    let pkg_config_path = install_dir.join("lib").join("pkgconfig");
+    let mut configure_cmd = Command::new("cmake");
+    configure_cmd
+        .arg("-GNinja")
+        .arg("-DBUILD_TEST=false")
+        .arg(format!("-DCMAKE_INSTALL_PREFIX={install_dir}"))
+        .arg(format!("-Svendor/libvpl"))
+        .arg(format!("-B{build_dir}"));
+    if let Some(cmake_toolchain_path) = cmake_toolchain_path {
+        configure_cmd
+            .args(["--toolchain", cmake_toolchain_path]);
+    }
+    let configure_status = configure_cmd
+        .status()
+        .expect("Failed to run rockchip-mpp configuration");
+    assert!(configure_status.success(), "Error configuring libvpl");
+    let build_status = Command::new("ninja")
+        .args([
+            "-C", build_dir.as_str(),
+            "install",
+        ])
+        .status()
+        .expect("Failed to run rockchip-mpp building");
+    assert!(build_status.success(), "Error building libvpl");
+
+    pkg_config_dirs.push(pkg_config_path);
 }
 
 fn build_ffmpeg(

@@ -432,7 +432,10 @@ Enable `link_vcpkg_ffmpeg` feature if you want to link ffmpeg provided by vcpkg.
 }
 
 fn build_all(env_vars: &EnvVars) -> (PathBuf, String) {
+    println!("Building FFmpeg. Current dir: {:?}", env::current_dir());
+
     let mut pkg_config_dirs = vec!();
+    let mut include_dirs = vec!();
     let mut shared_lib_cleanup_dirs = vec!();
 
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH env var");
@@ -522,17 +525,22 @@ fn build_all(env_vars: &EnvVars) -> (PathBuf, String) {
         );
     }
 
-    if env_vars.ffmpeg_configuration.iter().any(|v| v == "--enable-ffnvcodec") {
-        build_ffnvcodec(env_vars, &mut pkg_config_dirs);
-    }
-
     if env_vars.ffmpeg_configuration.iter().any(|v| v == "--enable-libvpl") {
         build_libvpl(env_vars, cmake_toolchain_path.as_deref(), &mut pkg_config_dirs);
+    }
+
+    if env_vars.ffmpeg_configuration.iter().any(|v| v == "--enable-amf") {
+        build_amf(env_vars, &mut include_dirs);
+    }
+
+    if env_vars.ffmpeg_configuration.iter().any(|v| v == "--enable-ffnvcodec") {
+        build_ffnvcodec(env_vars, &mut pkg_config_dirs);
     }
 
     let ffmpeg_include_dir = build_ffmpeg(
         env_vars,
         ffmpeg_cross_opts.as_deref(),
+        &mut include_dirs,
         &mut pkg_config_dirs,
     );
 
@@ -757,19 +765,42 @@ fn build_libvpl(
             "install",
         ])
         .status()
-        .expect("Failed to run rockchip-mpp building");
+        .expect("Failed to run libvpl building");
     assert!(build_status.success(), "Error building libvpl");
 
     pkg_config_dirs.push(pkg_config_path);
 }
 
+fn build_amf(
+    env_vars: &EnvVars,
+    include_dirs: &mut Vec<PathBuf>,
+) {
+    let out_dir = env_vars.out_dir.join("amf");
+    let install_dir = out_dir.join("install");
+    let include_dir = install_dir.join("include");
+    fs::create_dir_all(&include_dir)
+        .expect("Cannot create include directory for amf headers");
+
+    let copy_status = Command::new("cp")
+        .arg("-r")
+        .arg("vendor/amf/amf/public/include")
+        .arg(include_dir.join("AMF"))
+        .status()
+        .expect("Failed to copy amg headers");
+    assert!(copy_status.success(), "Error copying amf headers");
+
+    include_dirs.push(include_dir);
+}
+
 fn build_ffmpeg(
     env_vars: &EnvVars,
     cross_opts: Option<&[String]>,
+    include_dirs: &[PathBuf],
     pkg_config_dirs: &mut Vec<PathBuf>,
 ) -> PathBuf {
     let ffmpeg_out_dir = env_vars.out_dir.join("ffmpeg");
     println!("FFmpeg output directory: {ffmpeg_out_dir:?}");
+    println!("FFmpeg pkg config path: {pkg_config_dirs:?}");
     let ffmpeg_src_dir = ffmpeg_out_dir.join("src");
     if !ffmpeg_src_dir.join("configure").exists() {
         // We clone ffmpeg sources as ffmpeg produces build artifacts
@@ -799,9 +830,17 @@ fn build_ffmpeg(
             "--disable-doc",
             "--fatal-warnings",
         ]);
+
     if let Some(ffmpeg_cross_opts) = cross_opts {
         ffmpeg_configure_cmd
             .args(ffmpeg_cross_opts);
+    }
+
+    if !include_dirs.is_empty() {
+        for include_dir in include_dirs {
+            ffmpeg_configure_cmd
+                .arg(format!("--extra-cflags=-I{include_dir}"));
+        }
     }
 
     // Detect if we are inside a nix shell
@@ -819,6 +858,7 @@ fn build_ffmpeg(
         );
     };
     ffmpeg_configure_cmd.args(&env_vars.ffmpeg_configuration);
+    println!("FFmpeg configure command: {ffmpeg_configure_cmd:?}");
     assert!(
         ffmpeg_configure_cmd.status()
             .expect("Failed to run ffmpeg configuration")

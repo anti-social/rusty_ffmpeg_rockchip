@@ -16,3 +16,6 @@
 [submodule "vendor/libvpl"]
 	path = vendor/libvpl
 	url = https://github.com/intel/libvpl.git
+[submodule "vendor/amf"]
+	path = vendor/amf
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/AMF.git

@@ -298,6 +298,7 @@ impl EnvVars {
             ffmpeg_configuration: env::var("FFMPEG_CONFIGURATION").expect("FFMPEG_CONFIGURATION env var")
                 .split(' ')
                 .filter(|v| !v.is_empty())
+                .map(str::trim)
                 .map(String::from)
                 .collect(),
             ffmpeg_link_mode: env::var("FFMPEG_LINK_MODE").ok()
@@ -430,7 +431,13 @@ Enable `link_vcpkg_ffmpeg` feature if you want to link ffmpeg provided by vcpkg.
     }
 }
 
-fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
+fn build_all(env_vars: &EnvVars) -> (PathBuf, String) {
+    let mut pkg_config_dirs = vec!();
+    let mut shared_lib_cleanup_dirs = vec!();
+
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH env var");
+    println!("Target arch: {target_arch}");
+
     let cross_toolchain_prefix = env::var("CROSS_TOOLCHAIN_PREFIX").unwrap_or("".to_string());
     let (meson_cross_path, ffmpeg_cross_opts) = if !cross_toolchain_prefix.is_empty() {
         let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS env var");
@@ -439,8 +446,6 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
             os => os,
         };
         println!("Target os: {target_os}");
-        let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH env var");
-        println!("Target arch: {target_arch}");
         let cpu_arch = match target_arch.as_str() {
             "aarch64" => "armv8-a",
             "arm" => "armv7-a",
@@ -490,138 +495,212 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
     } else {
         (None, None)
     };
-    println!("{ffmpeg_cross_opts:?}");
 
     let cmake_toolchain_path = env::var(
         format!("CMAKE_TOOLCHAIN_FILE_{}", env_vars.target.replace("-", "_"))
     ).ok();
 
-    let mut ffmpeg_pkg_config_paths = vec!();
+    if env_vars.ffmpeg_rockchip_mpp {
+        build_libdrm(
+            env_vars,
+            meson_cross_path.as_deref(),
+            &mut pkg_config_dirs,
+            &mut shared_lib_cleanup_dirs,
+        );
 
-    let dirs_to_cleanup_shared_libs = if env_vars.ffmpeg_rockchip_mpp {
-        let libdrm_out_dir = env_vars.out_dir.join("libdrm");
-        let libdrm_build_dir = libdrm_out_dir.join("meson");
-        let libdrm_install_dir = libdrm_out_dir.join("install");
-        let libdrm_pkg_config_path = libdrm_install_dir.join("lib").join("pkgconfig");
-        let mut libdrm_setup_cmd = Command::new("meson");
-        libdrm_setup_cmd
-            .args([
-                "setup", "vendor/libdrm", libdrm_build_dir.as_str(),
-            ]);
-        if let Some(meson_cross_path) = &meson_cross_path {
-            libdrm_setup_cmd
-                .args(["--cross-file", meson_cross_path.as_str()]);
+        build_rockchip_librga(
+            env_vars,
+            meson_cross_path.as_deref(),
+            &mut pkg_config_dirs,
+        );
+
+        build_rockchip_mpp(
+            env_vars,
+            cmake_toolchain_path.as_deref(),
+            &mut pkg_config_dirs,
+            &mut shared_lib_cleanup_dirs,
+        );
+    }
+
+    if env_vars.ffmpeg_configuration.iter().any(|v| v == "--enable-ffnvcodec") {
+        build_ffnvcodec(env_vars, &mut pkg_config_dirs);
+    }
+
+    let ffmpeg_include_dir = build_ffmpeg(
+        env_vars,
+        ffmpeg_cross_opts.as_deref(),
+        &mut pkg_config_dirs,
+    );
+
+    for cleanup_shared_libs_dir in &shared_lib_cleanup_dirs {
+        // FIXME: Find out a way how to force a static linking
+        for shared_lib_file_entry in fs::read_dir(cleanup_shared_libs_dir)
+            .expect("Cannot read directory with shared libs for removing")
+        {
+            let shared_lib_file_path = shared_lib_file_entry
+                .expect("Cannot get shared lib entry")
+                .path();
+            let shared_lib_file_name = shared_lib_file_path.file_name()
+                .expect("Missing shared lib file name")
+                .to_string_lossy();
+            if shared_lib_file_name.ends_with(".so") || shared_lib_file_name.contains(".so.") {
+                fs::remove_file(&shared_lib_file_path)
+                    .expect(&format!("Failed to remove {shared_lib_file_path:?} file"));
+            }
         }
-        libdrm_setup_cmd
-            .args([
-                // "--wipe",
-                "--prefix", libdrm_install_dir.as_str(),
-                "--libdir=lib",
-                "--buildtype=release",
-                "--default-library=static",
-                "-Dintel=disabled",
-                "-Dradeon=disabled",
-                "-Damdgpu=disabled",
-                "-Dnouveau=disabled",
-                "-Dvmwgfx=disabled",
-            ]);
-        let libdrm_setup_status = libdrm_setup_cmd
-            .status()
-            .expect("Failed to run libdrm setup");
-        assert!(libdrm_setup_status.success(), "Error setting up libdrm");
-        let libdrm_configure_status = Command::new("meson")
-            .args(["configure", libdrm_build_dir.as_str()])
-            .status()
-            .expect("Failed to run libdrm configuration");
-        assert!(libdrm_configure_status.success(), "Error configuring libdrm");
-        let libdrm_build_status = Command::new("ninja")
-            .args(["-C", libdrm_build_dir.as_str(), "install"])
-            .status()
-            .expect("Failed to run libdrm building");
-        assert!(libdrm_build_status.success(), "Error building libdrm");
+    }
 
-        let rockchip_librga_out_dir = env_vars.out_dir.join("rockchip-librga");
-        let rockchip_librga_build_dir = rockchip_librga_out_dir.join("meson");
-        let rockchip_librga_install_dir = rockchip_librga_out_dir.join("install");
-        let rockchip_librga_pkg_config_path = rockchip_librga_install_dir.join("lib").join("pkgconfig");
-        let mut rockchip_librga_setup_cmd = Command::new("meson");
-        rockchip_librga_setup_cmd
-            .args([
-                "setup", "vendor/rockchip-librga", rockchip_librga_build_dir.as_str(),
-            ]);
-        if let Some(meson_cross_path) = &meson_cross_path {
-            rockchip_librga_setup_cmd
-                .args(["--cross-file", meson_cross_path.as_str()]);
-        }
-        rockchip_librga_setup_cmd
-            .args([
-                // "--wipe",
-                "--prefix", rockchip_librga_install_dir.as_str(),
-                "--libdir=lib",
-                "--buildtype=release",
-                "--default-library=static",
-                "-Dcpp_args=-fpermissive",
-                "-Dlibdrm=false",
-                "-Dlibrga_demo=false",
-                "-Dbuild_test=false",
-            ]);
-        let rockchip_librga_setup_status = rockchip_librga_setup_cmd
-            .status()
-            .expect("Failed to run rockchip-librga setup");
-        assert!(rockchip_librga_setup_status.success(), "Error setting up rockchip-librga");
-        let rockchip_librga_configure_status = Command::new("meson")
-            .args(["configure", rockchip_librga_build_dir.as_str()])
-            .status()
-            .expect("Failed to run rockchip-librga configuration");
-        assert!(rockchip_librga_configure_status.success(), "Error configuring rockchip-librga");
-        let rockchip_librga_build_status = Command::new("ninja")
-            .args(["-C", rockchip_librga_build_dir.as_str(), "install"])
-            .status()
-            .expect("Failed to run rockchip-librga building");
-        assert!(rockchip_librga_build_status.success(), "Error building rockchip-librga");
+    (
+        ffmpeg_include_dir,
+        mk_pkg_config_path(&pkg_config_dirs),
+    )
+}
 
-        let rockchip_mpp_out_dir = env_vars.out_dir.join("rockchip-mpp");
-        let rockchip_mpp_build_dir = rockchip_mpp_out_dir.join("cmake");
-        let rockchip_mpp_install_dir = rockchip_mpp_out_dir.join("install");
-        let rockchip_mpp_pkg_config_path = rockchip_mpp_install_dir.join("lib").join("pkgconfig");
-        let mut rockchip_mpp_configure_cmd = Command::new("cmake");
-        rockchip_mpp_configure_cmd
-            .arg("-GNinja")
-            .arg("-DBUILD_TEST=false")
-            .arg(format!("-DCMAKE_INSTALL_PREFIX={rockchip_mpp_install_dir}"))
-            .arg(format!("-Svendor/rockchip-mpp"))
-            .arg(format!("-B{rockchip_mpp_build_dir}"));
-        if let Some(cmake_toolchain_path) = cmake_toolchain_path {
-            rockchip_mpp_configure_cmd
-                .args(["--toolchain", &cmake_toolchain_path]);
-        }
-        let rockchip_mpp_configure_status = rockchip_mpp_configure_cmd
-            .status()
-            .expect("Failed to run rockchip-mpp configuration");
-        assert!(rockchip_mpp_configure_status.success(), "Error configuring rockchip-mpp");
-        let rockchip_mpp_build_status = Command::new("ninja")
-            .args([
-                "-C", rockchip_mpp_build_dir.as_str(),
-                "install",
-            ])
-            .status()
-            .expect("Failed to run rockchip-mpp building");
-        assert!(rockchip_mpp_build_status.success(), "Error building rockchip-mpp");
+fn mk_pkg_config_path(pkg_config_dirs: &[PathBuf]) -> String {
+    pkg_config_dirs.iter()
+        .map(|p| p.as_str())
+        .collect::<Vec<_>>()
+        .join(":")
+}
 
-        ffmpeg_pkg_config_paths.extend_from_slice(&[
-            libdrm_pkg_config_path,
-            rockchip_mpp_pkg_config_path,
-            rockchip_librga_pkg_config_path,
+fn build_libdrm(
+    env_vars: &EnvVars,
+    meson_cross_path: Option<&Path>,
+    pkg_config_dirs: &mut Vec<PathBuf>,
+    shared_lib_cleanup_dirs: &mut Vec<PathBuf>,
+) {
+    let libdrm_out_dir = env_vars.out_dir.join("libdrm");
+    let libdrm_build_dir = libdrm_out_dir.join("meson");
+    let libdrm_install_dir = libdrm_out_dir.join("install");
+    let libdrm_pkg_config_path = libdrm_install_dir.join("lib").join("pkgconfig");
+    let mut libdrm_setup_cmd = Command::new("meson");
+    libdrm_setup_cmd
+        .args([
+            "setup", "vendor/libdrm", libdrm_build_dir.as_str(),
         ]);
+    if let Some(meson_cross_path) = &meson_cross_path {
+        libdrm_setup_cmd
+            .args(["--cross-file", meson_cross_path.as_str()]);
+    }
+    libdrm_setup_cmd
+        .args([
+            // "--wipe",
+            "--prefix", libdrm_install_dir.as_str(),
+            "--libdir=lib",
+            "--buildtype=release",
+            "--default-library=static",
+            "-Dintel=disabled",
+            "-Dradeon=disabled",
+            "-Damdgpu=disabled",
+            "-Dnouveau=disabled",
+            "-Dvmwgfx=disabled",
+        ]);
+    let libdrm_setup_status = libdrm_setup_cmd
+        .status()
+        .expect("Failed to run libdrm setup");
+    assert!(libdrm_setup_status.success(), "Error setting up libdrm");
+    let libdrm_configure_status = Command::new("meson")
+        .args(["configure", libdrm_build_dir.as_str()])
+        .status()
+        .expect("Failed to run libdrm configuration");
+    assert!(libdrm_configure_status.success(), "Error configuring libdrm");
+    let libdrm_build_status = Command::new("ninja")
+        .args(["-C", libdrm_build_dir.as_str(), "install"])
+        .status()
+        .expect("Failed to run libdrm building");
+    assert!(libdrm_build_status.success(), "Error building libdrm");
 
-        vec!(
-            libdrm_install_dir.join("lib"),
-            rockchip_mpp_install_dir.join("lib"),
-        )
-    } else {
-        vec!()
-    };
+    pkg_config_dirs.push(libdrm_pkg_config_path);
+    shared_lib_cleanup_dirs.push(libdrm_install_dir.join("lib"));
+}
 
+fn build_rockchip_librga(
+    env_vars: &EnvVars,
+    meson_cross_path: Option<&Path>,
+    pkg_config_dirs: &mut Vec<PathBuf>,
+) {
+    let rockchip_librga_out_dir = env_vars.out_dir.join("rockchip-librga");
+    let rockchip_librga_build_dir = rockchip_librga_out_dir.join("meson");
+    let rockchip_librga_install_dir = rockchip_librga_out_dir.join("install");
+    let rockchip_librga_pkg_config_path = rockchip_librga_install_dir.join("lib").join("pkgconfig");
+    let mut rockchip_librga_setup_cmd = Command::new("meson");
+    rockchip_librga_setup_cmd
+        .args([
+            "setup", "vendor/rockchip-librga", rockchip_librga_build_dir.as_str(),
+        ]);
+    if let Some(meson_cross_path) = &meson_cross_path {
+        rockchip_librga_setup_cmd
+            .args(["--cross-file", meson_cross_path.as_str()]);
+    }
+    rockchip_librga_setup_cmd
+        .args([
+            // "--wipe",
+            "--prefix", rockchip_librga_install_dir.as_str(),
+            "--libdir=lib",
+            "--buildtype=release",
+            "--default-library=static",
+            "-Dcpp_args=-fpermissive",
+            "-Dlibdrm=false",
+            "-Dlibrga_demo=false",
+            "-Dbuild_test=false",
+        ]);
+    let rockchip_librga_setup_status = rockchip_librga_setup_cmd
+        .status()
+        .expect("Failed to run rockchip-librga setup");
+    assert!(rockchip_librga_setup_status.success(), "Error setting up rockchip-librga");
+    let rockchip_librga_configure_status = Command::new("meson")
+        .args(["configure", rockchip_librga_build_dir.as_str()])
+        .status()
+        .expect("Failed to run rockchip-librga configuration");
+    assert!(rockchip_librga_configure_status.success(), "Error configuring rockchip-librga");
+    let rockchip_librga_build_status = Command::new("ninja")
+        .args(["-C", rockchip_librga_build_dir.as_str(), "install"])
+        .status()
+        .expect("Failed to run rockchip-librga building");
+    assert!(rockchip_librga_build_status.success(), "Error building rockchip-librga");
+
+    pkg_config_dirs.push(rockchip_librga_pkg_config_path);
+}
+
+fn build_rockchip_mpp(
+    env_vars: &EnvVars,
+    cmake_toolchain_path: Option<&str>,
+    pkg_config_dirs: &mut Vec<PathBuf>,
+    shared_lib_cleanup_dirs: &mut Vec<PathBuf>,
+) {
+    let rockchip_mpp_out_dir = env_vars.out_dir.join("rockchip-mpp");
+    let rockchip_mpp_build_dir = rockchip_mpp_out_dir.join("cmake");
+    let rockchip_mpp_install_dir = rockchip_mpp_out_dir.join("install");
+    let rockchip_mpp_pkg_config_path = rockchip_mpp_install_dir.join("lib").join("pkgconfig");
+    let mut rockchip_mpp_configure_cmd = Command::new("cmake");
+    rockchip_mpp_configure_cmd
+        .arg("-GNinja")
+        .arg("-DBUILD_TEST=false")
+        .arg(format!("-DCMAKE_INSTALL_PREFIX={rockchip_mpp_install_dir}"))
+        .arg(format!("-Svendor/rockchip-mpp"))
+        .arg(format!("-B{rockchip_mpp_build_dir}"));
+    if let Some(cmake_toolchain_path) = cmake_toolchain_path {
+        rockchip_mpp_configure_cmd
+            .args(["--toolchain", cmake_toolchain_path]);
+    }
+    let rockchip_mpp_configure_status = rockchip_mpp_configure_cmd
+        .status()
+        .expect("Failed to run rockchip-mpp configuration");
+    assert!(rockchip_mpp_configure_status.success(), "Error configuring rockchip-mpp");
+    let rockchip_mpp_build_status = Command::new("ninja")
+        .args([
+            "-C", rockchip_mpp_build_dir.as_str(),
+            "install",
+        ])
+        .status()
+        .expect("Failed to run rockchip-mpp building");
+    assert!(rockchip_mpp_build_status.success(), "Error building rockchip-mpp");
+
+    pkg_config_dirs.push(rockchip_mpp_pkg_config_path);
+    shared_lib_cleanup_dirs.push(rockchip_mpp_install_dir.join("lib"));
+}
+
+fn build_ffnvcodec(env_vars: &EnvVars, pkg_config_dirs: &mut Vec<PathBuf>) {
     let ffnvcodec_out_dir = env_vars.out_dir.join("ffnvcodec");
     let ffnvcodec_install_dir = ffnvcodec_out_dir.join("install");
     let ffnvcodec_build_status = Command::new("make")
@@ -640,10 +719,17 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
         .status()
         .expect("Failed to install ffnvcodec");
     assert!(ffnvcodec_install_status.success(), "Error building rockchip-mpp");
-    ffmpeg_pkg_config_paths.push(ffnvcodec_install_dir.join("lib").join("pkgconfig"));
 
+    pkg_config_dirs.push(ffnvcodec_install_dir.join("lib").join("pkgconfig"));
+}
+
+fn build_ffmpeg(
+    env_vars: &EnvVars,
+    cross_opts: Option<&[String]>,
+    pkg_config_dirs: &mut Vec<PathBuf>,
+) -> PathBuf {
     let ffmpeg_out_dir = env_vars.out_dir.join("ffmpeg");
-    println!("ffmpeg output directory: {ffmpeg_out_dir:?}");
+    println!("FFmpeg output directory: {ffmpeg_out_dir:?}");
     let ffmpeg_src_dir = ffmpeg_out_dir.join("src");
     if !ffmpeg_src_dir.join("configure").exists() {
         // We clone ffmpeg sources as ffmpeg produces build artifacts
@@ -673,18 +759,13 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
             "--disable-doc",
             "--fatal-warnings",
         ]);
-    if let Some(ffmpeg_cross_opts) = ffmpeg_cross_opts {
+    if let Some(ffmpeg_cross_opts) = cross_opts {
         ffmpeg_configure_cmd
-            .args(&ffmpeg_cross_opts);
+            .args(ffmpeg_cross_opts);
     }
 
     // Detect if we are inside a nix shell
-    // let mut ffmpeg_pkg_config_path = String::new();
-    let ffmpeg_pkg_config_path = ffmpeg_pkg_config_paths.iter()
-        .map(|p| p.as_str())
-        .collect::<Vec<_>>()
-        .join(":");
-    println!("pkg config path: {ffmpeg_pkg_config_path}");
+    let ffmpeg_pkg_config_path = mk_pkg_config_path(&pkg_config_dirs);
     if let Ok(pkg_config_path) = env::var("PKG_CONFIG_PATH_FOR_TARGET") {
         ffmpeg_configure_cmd.env(
             "PKG_CONFIG_PATH_FOR_TARGET",
@@ -719,42 +800,21 @@ fn build_ffmpeg(env_vars: &EnvVars) -> (PathBuf, String) {
         .expect("Failed to run ffmpeg installation");
     assert!(ffmpeg_install_status.success(), "Error installing ffmpeg");
 
-    for cleanup_shared_libs_dir in &dirs_to_cleanup_shared_libs {
-        // FIXME: Find out a way how to force a static linking
-        for shared_lib_file_entry in fs::read_dir(cleanup_shared_libs_dir)
-            .expect("Cannot read directory with shared libs for removing")
-        {
-            let shared_lib_file_path = shared_lib_file_entry
-                .expect("Cannot get shared lib entry")
-                .path();
-            let shared_lib_file_name = shared_lib_file_path.file_name()
-                .expect("Missing shared lib file name")
-                .to_string_lossy();
-            if shared_lib_file_name.ends_with(".so") || shared_lib_file_name.contains(".so.") {
-                fs::remove_file(&shared_lib_file_path)
-                    .expect(&format!("Failed to remove {shared_lib_file_path:?} file"));
-            }
-        }
-    }
+    pkg_config_dirs.push(
+        ffmpeg_install_dir.join("lib").join("pkgconfig")
+    );
 
-    (
-        ffmpeg_install_dir.join("include"),
-        format!(
-            "{}:{}",
-            ffmpeg_pkg_config_path,
-            ffmpeg_install_dir.join("lib").join("pkgconfig"),
-        )
-    )
+    ffmpeg_install_dir.join("include")
 }
 
 fn main() {
     let env_vars = EnvVars::init();
 
-    let (ffmpeg_include_dir, ffmpeg_pkg_config_path) = build_ffmpeg(&env_vars);
-    println!("FFmpeg include dir: {ffmpeg_include_dir}");
-    println!("FFmpeg pkg-config path: {ffmpeg_pkg_config_path}");
+    let (include_dir, pkg_config_path) = build_all(&env_vars);
+    println!("FFmpeg include dir: {}", include_dir);
+    println!("FFmpeg pkg-config path: {}", pkg_config_path);
 
-    linking(&env_vars, &ffmpeg_include_dir, &ffmpeg_pkg_config_path);
+    linking(&env_vars, &include_dir, &pkg_config_path);
 
     // To link examples
     println!("cargo:rustc-link-arg=-lstdc++");

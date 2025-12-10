@@ -749,6 +749,7 @@ fn build_libvpl(
         .arg("-GNinja")
         .arg("-DBUILD_TEST=false")
         .arg(format!("-DCMAKE_INSTALL_PREFIX={install_dir}"))
+        .arg(format!("-DBUILD_SHARED_LIBS=OFF"))
         .arg(format!("-Svendor/libvpl"))
         .arg(format!("-B{build_dir}"));
     if let Some(cmake_toolchain_path) = cmake_toolchain_path {

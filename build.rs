@@ -897,6 +897,6 @@ fn main() {
 
     linking(&env_vars, &include_dir, &pkg_config_path);
 
-    // To link examples
-    println!("cargo:rustc-link-arg=-lstdc++");
+    // https://github.com/rust-lang/rust/issues/37403#issuecomment-2061712123
+    println!("cargo:rustc-link-lib=static:-bundle=stdc++");
 }

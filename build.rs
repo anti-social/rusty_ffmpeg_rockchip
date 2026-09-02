@@ -784,7 +784,7 @@ fn build_amf(
 
     let copy_status = Command::new("cp")
         .arg("-r")
-        .arg("vendor/amf/amf/public/include")
+        .arg("vendor/amf-headers/include")
         .arg(include_dir.join("AMF"))
         .status()
         .expect("Failed to copy amg headers");

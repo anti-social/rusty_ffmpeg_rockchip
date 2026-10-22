@@ -654,7 +654,6 @@ fn build_rockchip_librga(
             "-Dcpp_args=-fpermissive",
             "-Dlibdrm=false",
             "-Dlibrga_demo=false",
-            "-Dbuild_test=false",
         ]);
     let rockchip_librga_setup_status = rockchip_librga_setup_cmd
         .status()

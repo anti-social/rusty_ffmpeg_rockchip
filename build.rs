@@ -451,7 +451,8 @@ fn build_all(env_vars: &EnvVars) -> (PathBuf, String) {
         println!("Target os: {target_os}");
         let cpu_arch = match target_arch.as_str() {
             "aarch64" => "armv8-a",
-            "arm" => "armv7-a",
+            // Plain armv7-a disables FPU which breaks hard-float toolchains
+            "arm" => "armv7-a+fp",
             _ => &target_arch
         };
         println!("CPU arch: {cpu_arch:?}");
